@@ -82,7 +82,7 @@ sendAction = scope "send" $ catch sendAction' onError where
   onError :: (MonadLog m, MonadTask m) => E.SomeException -> ActionM m ()
   onError _ = do
     i <- asks (T.encodeUtf8 . actionTaskId)
-    _ <- inTask $ R.hmset i [("status", "send_error"), ("action", "")]
+    _ <- inTask $ R.hmset i [("status", "send_error")]
     return ()
 
 statusAction :: (MonadLog m, MonadTask m) => ActionM m ()
