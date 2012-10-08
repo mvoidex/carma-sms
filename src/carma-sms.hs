@@ -1,15 +1,14 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Main (
   main
   ) where
 
-import Prelude hiding (log)
+import Prelude hiding (log, catch)
 
+import Control.Monad.Trans
 import Control.Concurrent
-import Control.Monad.Error
-import Control.Monad.Reader
-import qualified Data.ByteString.Char8 as C8
 import Data.List
 import Data.Maybe (mapMaybe)
 import qualified Data.Map as M
@@ -20,7 +19,8 @@ import qualified Database.Redis as R
 import System.Environment
 import System.Log
 import System.Worker.Redis
-import SMSDirect
+
+import Action
 
 -- convert arguments to map
 -- ["-f1", "value1", "-f2", "value2"] => fromList [("-f1", "value1"), ("-f2", "value2")]
@@ -34,39 +34,27 @@ arguments = M.fromList . mapMaybe toTuple . splitBy 2 where
   splitBy = unfoldr . takedrop
 
   takedrop :: Int -> [a] -> Maybe ([a], [a])
-  takedrop n [] = Nothing
+  takedrop _ [] = Nothing
   takedrop n xs = Just (take n xs, drop n xs)
-
--- Argument information
-data Argument = Argument {
-  argumentFlag :: String,
-  argumentName :: String,
-  argumentDefault :: String }
 
 -- convert arguments to map with replacing default values
 args :: [(String, String)] -> [String] -> M.Map String String
 args as s = arguments s `M.union` M.fromList as
 
-instance MonadLog m => MonadLog (ReaderT R.Connection m) where
+instance MonadLog m => MonadLog (TaskMonad m) where
   askLog = lift askLog
 
 rules :: String -> Rules
 rules r = [
   parseRule_ (fromString $ "/: use " ++ r)]
 
--- Logs error and return
-smsdirect' :: MonadLog m => T.Text -> T.Text -> SMSDirect.Command a -> m (Either String a)
-smsdirect' u p cmd = scope "direct" $ do
-  log Trace $ T.concat ["URL: ", fromString $ url u p cmd]
-  v <- liftIO $ smsdirect u p cmd
-  case v of
-    Left code -> do
-      log Error $ T.concat ["Error code: ", fromString $ show code]
-      return $ Left $ show code
-    Right x -> return $ Right x
-
-ignore :: Monad m => m a -> m ()
-ignore = (>> return ())
+-- | SMS format
+-- from: sender
+-- phone: receiver
+-- msg: message
+-- action: action to perform on sms (send/status)
+-- msgid: message id in smsdirect
+-- status: status of message (delivered/sent/send_error)
 
 main :: IO ()
 main = do
@@ -101,54 +89,8 @@ main = do
         runTask conn $ processTasks (fromString $ flag "-k") (fromString $ flag "-k" ++ ":" ++ flag "-i") process onError
       where
         process i m = scope "sms" $ scope (T.decodeUtf8 i) $ do
-          log Trace $ T.concat ["Sender: ", from]
-          log Trace $ T.concat ["To: ", to]
-          log Trace $ T.concat ["Message: ", msg]
-          log Trace $ T.concat ["Action: ", action]
-
-          maybe noAction id $ M.lookup action actions
-
+          action user pass (fromString $ flag "-k") (T.decodeUtf8 i) (M.mapKeys T.decodeUtf8 . M.map T.decodeUtf8 $ m)
           liftIO $ threadDelay 200000 -- 5 messages per second
-          where
-            actions = M.fromList [
-              ("send", sendAction),
-              ("status", statusAction)]
-
-            sendAction :: (MonadLog m) => TaskMonad m ()
-            sendAction = ignore $ runErrorT $ do
-              mid <- ErrorT $ smsdirect' user pass $ submitMessage from (phone to) msg Nothing
-              lift $ do
-                log Trace $ T.concat ["Message id: ", fromString $ show mid]
-                redisInTask $ do
-                  R.hmset i [
-                    ("msgid", C8.pack $ show mid),
-                    ("msgstatus", "1"),
-                    ("action", "status")]
-                  R.lpush (fromString $ flag "-k") [i]
-
-            statusAction :: (MonadLog m) => TaskMonad m ()
-            statusAction = ignore $ runErrorT $ do
-              st <- ErrorT $ smsdirect' user pass $ statusMessage (read . T.unpack $ msgid)
-              lift $ do
-                log Trace $ T.concat ["Status of message ", msgid, ": ", fromString $ show st]
-                if st == 1
-                  then redisInTask $ do
-                    R.hmset i [("msgstatus", "1")]
-                    R.lpush (fromString $ flag "-k") [i]
-                    return ()
-                  else redisInTask $ do
-                    R.hmset i [
-                      ("msgstatus", fromString $ show st),
-                      ("action", "")]
-                    return ()
-
-            noAction = log Error $ T.concat ["Invalid action: ", action]
-
-            from = T.decodeUtf8 $ m M.! "from"
-            to = T.decodeUtf8 $ m M.! "phone"
-            msg = T.decodeUtf8 $ m M.! "msg"
-            msgid = T.decodeUtf8 $ m M.! "msgid"
-            action = maybe "send" T.decodeUtf8 $ M.lookup "action" m
 
         onError i = scope "sms" $ log Error $ T.concat ["Unable to process: ", T.decodeUtf8 i]
         flag = (flags M.!)
