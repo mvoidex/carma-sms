@@ -83,7 +83,7 @@ main = do
       "  carma-sms -u user -p pass -l silent -k smspostlist"]
     main' flags = do
       conn <- R.connect R.defaultConnectInfo
-      l <- newLog (constant (rules $ flag "-l")) [logger text (file "carma-sms.log")]
+      l <- newLog (constant (rules $ flag "-l")) [logger text (file "log/carma-sms.log")]
       withLog l $ do
         scope "sms" $ log Info $ T.concat ["Starting sms for user ", user, " with password ", pass]
         runTask conn $ processTasks (fromString $ flag "-k") (fromString $ flag "-k" ++ ":" ++ flag "-i") process onError
