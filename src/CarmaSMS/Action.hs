@@ -127,7 +127,7 @@ noAction a = log Error $ T.concat ["Invalid action: ", a]
 
 -- | Send SMS
 sendAction :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError ActionError m) => m ()
-sendAction = scope "send" $ catchError sendAction' onError where
+sendAction = scopeM "send" $ catchError sendAction' onError where
   sendAction' = do
     u <- asks actionUser
     p <- asks actionPass
@@ -158,18 +158,21 @@ sendAction = scope "send" $ catchError sendAction' onError where
 
 -- | Retrieve status of SMS
 statusAction :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError ActionError m) => m ()
-statusAction = scope "status" $ do
+statusAction = scopeM "status" $ do
   u <- asks actionUser
   p <- asks actionPass
   i <- asks (T.encodeUtf8 . actionTaskId)
-  tasks <- asks (T.encodeUtf8 . actionTaskList)
 
   msgid <- askData "msgid"
   st <- smsdirect' u p $ statusMessage (read . T.unpack $ msgid)
   case st of
     Just 0 -> inTask $ R.hmset i [("status", "delivered"), ("action", "")] >> return ()
-    Just 1 -> inTask $ R.lpush tasks [i] >> return ()
-    _ -> return ()
+    Just 1 -> do
+      e <- runErrorT pushRetry
+      case e of
+        Left s -> throwError . strMsg $ s
+        Right v -> return v
+    _ -> throwError . strMsg $ "Invalid status"
 
 -- | Get field of data
 askData :: (Error e, MonadLog m, MonadTask m, MonadReader Action m, MonadError e m) => T.Text -> m T.Text
@@ -195,7 +198,7 @@ smsdirect' u p cmd = do
 -- Increases \'tries\' field, sets \'lasttry\' to now and pushes task id to task-retry-list
 --
 pushRetry :: (MonadLog m, MonadTask m, MonadError String m, MonadReader Action m) => m ()
-pushRetry = scope "retry" $ catchError pushRetry' pushError where
+pushRetry = scopeM "retry" $ catchError pushRetry' pushError where
   pushRetry' = do
     b <- push'
     when (not b) $ log Warning "Number of retries exceeded"
@@ -219,7 +222,7 @@ pushRetry = scope "retry" $ catchError pushRetry' pushError where
           R.lpush retryList [i]
         return True
 
-readField :: (Read a, Show a, MonadError String m) => T.Text -> T.Text -> m a
+readField :: (Read a, Show a, Error e, MonadError e m) => T.Text -> T.Text -> m a
 readField field s = case reads (T.unpack s) of
   [(i, "")] -> return i
   _ -> throwError . strMsg $ "Unable to parse field '" ++ T.unpack field ++ "': " ++ T.unpack s
