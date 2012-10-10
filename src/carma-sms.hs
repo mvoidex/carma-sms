@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | SMS posting for carma
 -- 
@@ -44,21 +43,18 @@ module Main (
 
 import Prelude hiding (log, catch)
 
-import Control.Monad.Trans
-import Control.Monad.Error
 import Control.Concurrent
 import Data.List
 import Data.Maybe (mapMaybe)
 import qualified Data.Map as M
 import Data.String
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 import qualified Database.Redis as R
 import System.Environment
 import System.Log
-import System.Worker.Redis
 
-import CarmaSMS.Action
+import CarmaSMS.Action (Action(..))
+import CarmaSMS.Process
 
 -- convert arguments to map
 -- ["-f1", "value1", "-f2", "value2"] => fromList [("-f1", "value1"), ("-f2", "value2")]
@@ -79,9 +75,6 @@ arguments = M.fromList . mapMaybe toTuple . splitBy 2 where
 args :: [(String, String)] -> [String] -> M.Map String String
 args as s = arguments s `M.union` M.fromList as
 
-instance MonadLog m => MonadLog (TaskMonad m) where
-  askLog = lift askLog
-
 rules :: String -> Rules
 rules r = [
   parseRule_ (fromString $ "/: use " ++ r)]
@@ -99,8 +92,9 @@ main = do
       ("-l", "default"),
       ("-k", "smspost"),
       ("-r", "smspost:retry"),
-      ("-m", "10"),
+      ("-retries", "10"),
       ("-d", "60"),
+      ("-mps", "5"),
       ("-i", "1")]
     printUsage = mapM_ putStrLn $ [
       "Usage: carma-sms [flags] where",
@@ -109,8 +103,9 @@ main = do
       "  -l <level> - log level, default is 'default', possible values are: trace, debug, default, silent",
       "  -k <key> - redis key for tasks, default is 'smspost'",
       "  -r <retry key> - redis key for retries, default is 'smspost:retry'",
-      "  -m <int> - max retries on sms actions",
+      "  -retries <int> - max retries on sms actions",
       "  -d <seconds> - delta between tries",
+      "  -mps <int> - HTTP requests per second",
       "  -i <id> - id of task-processing list, default is '1' (key will be 'smspost:1')",
       "",
       "Examples:",
@@ -120,29 +115,24 @@ main = do
     main' flags = do
       conn <- R.connect R.defaultConnectInfo
       l <- newLog (constant (rules $ flag "-l")) [logger text (file "log/carma-sms.log")]
-      withLog l $ do
-        scope "sms" $ log Info $ T.concat ["Starting sms for user ", user, " with password ", pass]
-        e <- runErrorT $ runTask conn $ processTasks (fromString $ flag "-k") (fromString $ flag "-k" ++ ":" ++ flag "-i") process onError
-        case e of
-          Left str -> scope "sms" $ do
-            log Fatal $ T.concat ["Fatal error: ", fromString str]
-            return ()
-          _ -> return ()
-      where
-        process i m = scope "sms" $ scope (T.decodeUtf8 i) $ do
-          action $ Action {
-            actionUser = user,
-            actionPass = pass,
-            actionTaskList = fromString $ flag "-k",
-            actionTaskId = T.decodeUtf8 i,
-            actionTaskRetry = fromString $ flag "-r",
-            actionTaskRetries = iflag 10 "-m",
-            actionTaskRetryDelta = iflag 60 "-d",
-            actionData = M.mapKeys T.decodeUtf8 . M.map T.decodeUtf8 $ m
-          }
-          liftIO $ threadDelay 200000 -- 5 messages per second
 
-        onError i = scope "sms" $ log Error $ T.concat ["Unable to process: ", T.decodeUtf8 i]
+      _ <- forkIO $ retry l conn conf
+      post l conn conf
+
+      where
+        conf = Action {
+          actionUser = user,
+          actionPass = pass,
+          actionProcessId = fromString $ flag "-i",
+          actionTaskList = fromString $ flag "-k",
+          actionTaskId = "",
+          actionTaskRetry = fromString $ flag "-retries",
+          actionTaskRetries = iflag 10 "-m",
+          actionTaskRetryDelta = iflag 60 "-d",
+          actionMessagesPerSecond = iflag 5 "-mps",
+          actionData = M.empty
+        }
+
         flag = (flags M.!)
         iflag v = tryRead . flag where
           tryRead s = case reads s of

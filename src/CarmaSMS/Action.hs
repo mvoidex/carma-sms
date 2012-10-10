@@ -5,14 +5,18 @@ module CarmaSMS.Action (
   Action(..),
   ActionM,
   action,
+  retry,
   runAction,
+  runRetry,
   noAction,
   sendAction,
-  statusAction
+  statusAction,
+  pushRetry
   ) where
 
 import Prelude hiding (log, catch)
 
+import Control.Concurrent
 import Control.Monad.CatchIO
 import Control.Monad.Reader
 import Control.Monad.Error
@@ -33,11 +37,13 @@ import SMSDirect
 data Action = Action {
   actionUser :: T.Text,
   actionPass :: T.Text,
+  actionProcessId :: T.Text,
   actionTaskList :: T.Text,
   actionTaskId :: T.Text,
   actionTaskRetry :: T.Text,
   actionTaskRetries :: Int,
   actionTaskRetryDelta :: Int,
+  actionMessagesPerSecond :: Int,
   actionData :: M.Map T.Text T.Text }
 
 -- | Action monad
@@ -74,6 +80,13 @@ instance MonadError e m => MonadError e (ActionM m) where
 action :: (MonadLog m, MonadTask m, MonadError String m) => Action -> m ()
 action a = runReaderT (actionM runAction) a
 
+-- | Retry action
+--
+-- Read \'lasttry\' field, waits delta-time and pushes task back to tasklist
+--
+retry :: (MonadLog m, MonadTask m, MonadError String m) => Action -> m ()
+retry a = runReaderT (actionM runRetry) a
+
 -- | Run action
 runAction :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError String m) => m ()
 runAction = do
@@ -83,16 +96,30 @@ runAction = do
     Left (SMSDirectError 200) -> do
       log Fatal "Invalid login or password"
       throwError . strMsg $ "Invalid login or password"
-    _ -> catchError retry' retryError where
-      retry' = do
-        b <- retry
-        when (not b) $ log Warning "Number of retries exceeded"
-      retryError s = do
-        log Error $ T.concat ["Unable to retry: ", fromString s]
+    _ -> pushRetry
   where
     actions = M.fromList [
       ("send", sendAction),
       ("status", statusAction)]
+
+-- | Run retry
+runRetry :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError String m) => m ()
+runRetry = catchError runRetry' onError
+  where
+    runRetry' = do
+      delay <- asks actionTaskRetryDelta
+      i <- asks (T.encodeUtf8 . actionTaskId)
+      tasks <- asks (T.encodeUtf8 . actionTaskList)
+      tm <- askData "lasttry"
+      tm' <- readField "lasttry" tm
+      cur <- liftIO $ liftM floor getPOSIXTime
+      -- wait until tm' + delay
+      liftIO $ threadDelay $ max 0 ((tm' + delay - cur) * 1000000)
+      _ <- inTask $ R.lpush tasks [i]
+      return ()
+    onError e = do
+      log Error $ T.concat ["Unable to perform retry: ", fromString e]
+      pushRetry
 
 -- | Catch-all action
 noAction :: (MonadLog m, MonadTask m, MonadReader Action m) => T.Text -> m ()
@@ -145,7 +172,7 @@ statusAction = scope "status" $ do
     _ -> return ()
 
 -- | Get field of data
-askData :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError ActionError m) => T.Text -> m T.Text
+askData :: (Error e, MonadLog m, MonadTask m, MonadReader Action m, MonadError e m) => T.Text -> m T.Text
 askData t = do
   m <- asks actionData
   case M.lookup t m of
@@ -167,27 +194,32 @@ smsdirect' u p cmd = do
 --
 -- Increases \'tries\' field, sets \'lasttry\' to now and pushes task id to task-retry-list
 --
-retry :: (MonadLog m, MonadTask m, MonadError String m, MonadReader Action m) => m Bool
-retry = scope "retry" $ do
-  triesStr <- asks (M.lookup "tries" . actionData)
-  triesNum <- maybe (return 0) tryRead triesStr
-  i <- asks (T.encodeUtf8 . actionTaskList)
-  retryList <- asks (T.encodeUtf8 . actionTaskRetry)
-  maxRetries <- asks actionTaskRetries
+pushRetry :: (MonadLog m, MonadTask m, MonadError String m, MonadReader Action m) => m ()
+pushRetry = scope "retry" $ catchError pushRetry' pushError where
+  pushRetry' = do
+    b <- push'
+    when (not b) $ log Warning "Number of retries exceeded"
+  pushError s = log Error $ T.concat ["Unable to retry: ", fromString s]
+  push' = do
+    triesStr <- asks (M.lookup "tries" . actionData)
+    triesNum <- maybe (return 0) (readField "tries") triesStr
+    i <- asks (T.encodeUtf8 . actionTaskList)
+    retryList <- asks (T.encodeUtf8 . actionTaskRetry)
+    maxRetries <- asks actionTaskRetries
 
-  if triesNum >= maxRetries
-    then return False
-    else do
-      tm <- liftIO $ liftM floor getPOSIXTime
+    if triesNum >= maxRetries
+      then return False
+      else do
+        tm <- liftIO $ liftM floor getPOSIXTime
 
-      _ <- inTask $ do
-        _ <- R.hmset i [
-          ("tries", fromString . show . succ $ triesNum),
-          ("lasttry", fromString . show $ (tm :: Int))]
-        R.lpush retryList [i]
-      return True
-  where
-    tryRead :: (MonadError String m) => T.Text -> m Int
-    tryRead s = case reads (T.unpack s) of
-      [(i, "")] -> return i
-      _ -> throwError . strMsg $ "Unable to parse 'tries' field: " ++ T.unpack s
+        _ <- inTask $ do
+          _ <- R.hmset i [
+            ("tries", fromString . show . succ $ triesNum),
+            ("lasttry", fromString . show $ (tm :: Int))]
+          R.lpush retryList [i]
+        return True
+
+readField :: (Read a, Show a, MonadError String m) => T.Text -> T.Text -> m a
+readField field s = case reads (T.unpack s) of
+  [(i, "")] -> return i
+  _ -> throwError . strMsg $ "Unable to parse field '" ++ T.unpack field ++ "': " ++ T.unpack s
