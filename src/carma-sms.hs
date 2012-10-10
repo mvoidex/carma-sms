@@ -1,6 +1,43 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
+-- | SMS posting for carma
+-- 
+-- Start process:
+-- @
+-- carma-sms -u user -p password
+-- @
+-- 
+-- Then send sms:
+-- @
+-- redis> hmset sms:1 from me phone 70001234567 msg \"test message\"
+-- redis> lpush smspost sms:1
+-- @
+-- 
+-- | SMS object
+-- 
+-- SMS object stored in redis has following format:
+-- 
+--   * from - sender
+--
+--   * phone - receiver, contains only digits
+--
+--   * msg - message in UTF-8
+--
+--   * action - filled by process, send or status
+--
+--   * msgid - filled by process, message id in smsdirect
+--
+--   * status - filled by process, message status, delivered, sent or send_error
+-- 
+--   * lasttry: timestamp of last try
+--
+--   * tries: number of tries
+-- 
+-- When carma-sms fails to send (or get status) sms, it pushes sms to retry-list (smspost:retry by default).
+-- 
+-- After that another thread will push these sms's back to \'smspost\'-list periodically until it succeeded or number of tries exceeded
+--
 module Main (
   main
   ) where
@@ -8,6 +45,7 @@ module Main (
 import Prelude hiding (log, catch)
 
 import Control.Monad.Trans
+import Control.Monad.Error
 import Control.Concurrent
 import Data.List
 import Data.Maybe (mapMaybe)
@@ -20,7 +58,7 @@ import System.Environment
 import System.Log
 import System.Worker.Redis
 
-import Action
+import CarmaSMS.Action
 
 -- convert arguments to map
 -- ["-f1", "value1", "-f2", "value2"] => fromList [("-f1", "value1"), ("-f2", "value2")]
@@ -48,14 +86,6 @@ rules :: String -> Rules
 rules r = [
   parseRule_ (fromString $ "/: use " ++ r)]
 
--- | SMS format
--- from: sender
--- phone: receiver
--- msg: message
--- action: action to perform on sms (send/status)
--- msgid: message id in smsdirect
--- status: status of message (delivered/sent/send_error)
-
 main :: IO ()
 main = do
   as <- getArgs
@@ -68,6 +98,9 @@ main = do
       ("-p", error "Password not specified"),
       ("-l", "default"),
       ("-k", "smspost"),
+      ("-r", "smspost:retry"),
+      ("-m", "10"),
+      ("-d", "60"),
       ("-i", "1")]
     printUsage = mapM_ putStrLn $ [
       "Usage: carma-sms [flags] where",
@@ -75,6 +108,9 @@ main = do
       "  -p <pass> - password for smsdirect",
       "  -l <level> - log level, default is 'default', possible values are: trace, debug, default, silent",
       "  -k <key> - redis key for tasks, default is 'smspost'",
+      "  -r <retry key> - redis key for retries, default is 'smspost:retry'",
+      "  -m <int> - max retries on sms actions",
+      "  -d <seconds> - delta between tries",
       "  -i <id> - id of task-processing list, default is '1' (key will be 'smspost:1')",
       "",
       "Examples:",
@@ -86,14 +122,32 @@ main = do
       l <- newLog (constant (rules $ flag "-l")) [logger text (file "log/carma-sms.log")]
       withLog l $ do
         scope "sms" $ log Info $ T.concat ["Starting sms for user ", user, " with password ", pass]
-        runTask conn $ processTasks (fromString $ flag "-k") (fromString $ flag "-k" ++ ":" ++ flag "-i") process onError
+        e <- runErrorT $ runTask conn $ processTasks (fromString $ flag "-k") (fromString $ flag "-k" ++ ":" ++ flag "-i") process onError
+        case e of
+          Left str -> scope "sms" $ do
+            log Fatal $ T.concat ["Fatal error: ", fromString str]
+            return ()
+          _ -> return ()
       where
         process i m = scope "sms" $ scope (T.decodeUtf8 i) $ do
-          action user pass (fromString $ flag "-k") (T.decodeUtf8 i) (M.mapKeys T.decodeUtf8 . M.map T.decodeUtf8 $ m)
+          action $ Action {
+            actionUser = user,
+            actionPass = pass,
+            actionTaskList = fromString $ flag "-k",
+            actionTaskId = T.decodeUtf8 i,
+            actionTaskRetry = fromString $ flag "-r",
+            actionTaskRetries = iflag 10 "-m",
+            actionTaskRetryDelta = iflag 60 "-d",
+            actionData = M.mapKeys T.decodeUtf8 . M.map T.decodeUtf8 $ m
+          }
           liftIO $ threadDelay 200000 -- 5 messages per second
 
         onError i = scope "sms" $ log Error $ T.concat ["Unable to process: ", T.decodeUtf8 i]
         flag = (flags M.!)
+        iflag v = tryRead . flag where
+          tryRead s = case reads s of
+            [(i, "")] -> i
+            _ -> v
         user :: T.Text
         user = fromString $ flag "-u"
         pass :: T.Text
