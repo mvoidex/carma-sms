@@ -133,6 +133,7 @@ sendAction = scopeM "send" $ catchError sendAction' onError where
     p <- asks actionPass
     i <- asks (T.encodeUtf8 . actionTaskId)
     tasks <- asks (T.encodeUtf8 . actionTaskList)
+    log Trace $ T.concat ["Sending ", T.decodeUtf8 i]
 
     from <- askData "from"
     to <- askData "phone"
@@ -141,7 +142,7 @@ sendAction = scopeM "send" $ catchError sendAction' onError where
     to' <- either (throwError . strMsg) return $ phone to
 
     mid <- smsdirect' u p $ submitMessage from' to' msg Nothing
-    log Trace $ T.concat ["Message id: ", fromString $ show mid]
+    log Debug $ T.concat ["Message id: ", fromString $ show mid]
     _ <- inTask $ do
       _ <- R.hmset i [
         ("msgid", C8.pack $ show mid),
@@ -163,8 +164,11 @@ statusAction = scopeM "status" $ do
   p <- asks actionPass
   i <- asks (T.encodeUtf8 . actionTaskId)
 
+  log Trace $ T.concat ["Getting status for ", T.decodeUtf8 i]
+
   msgid <- askData "msgid"
   st <- smsdirect' u p $ statusMessage (read . T.unpack $ msgid)
+  log Debug $ T.concat ["Message status: ", fromString $ maybe "(none)" show st]
   case st of
     Just 0 -> inTask $ R.hmset i [("status", "delivered"), ("action", "")] >> return ()
     Just 1 -> do

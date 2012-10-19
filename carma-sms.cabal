@@ -32,4 +32,4 @@ executable carma-sms
     MonadCatchIO-transformers == 0.3.*,
     time == 1.4.*
 
-  ghc-options: -Wall
+  ghc-options: -Wall -threaded

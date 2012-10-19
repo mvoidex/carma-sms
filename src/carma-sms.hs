@@ -96,7 +96,7 @@ main = do
       ("-d", "60"),
       ("-mps", "5"),
       ("-i", "1")]
-    printUsage = mapM_ putStrLn $ [
+    printUsage = mapM_ putStrLn [
       "Usage: carma-sms [flags] where",
       "  -u <user> - login for smsdirect",
       "  -p <pass> - password for smsdirect",
@@ -117,7 +117,9 @@ main = do
       l <- newLog (constant (rules $ flag "-l")) [logger text (file "log/carma-sms.log")]
 
       _ <- forkIO $ retry l conn conf
-      post l conn conf
+      _ <- forkIO $ post l conn conf
+      _ <- getLine
+      return ()
 
       where
         conf = Action {
@@ -126,8 +128,8 @@ main = do
           actionProcessId = fromString $ flag "-i",
           actionTaskList = fromString $ flag "-k",
           actionTaskId = "",
-          actionTaskRetry = fromString $ flag "-retries",
-          actionTaskRetries = iflag 10 "-m",
+          actionTaskRetry = fromString $ flag "-r",
+          actionTaskRetries = iflag 10 "-retries",
           actionTaskRetryDelta = iflag 60 "-d",
           actionMessagesPerSecond = iflag 5 "-mps",
           actionData = M.empty
