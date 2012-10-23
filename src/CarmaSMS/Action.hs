@@ -210,7 +210,7 @@ pushRetry = scopeM "retry" $ catchError pushRetry' pushError where
   push' = do
     triesStr <- asks (M.lookup "tries" . actionData)
     triesNum <- maybe (return 0) (readField "tries") triesStr
-    i <- asks (T.encodeUtf8 . actionTaskList)
+    i <- asks (T.encodeUtf8 . actionTaskId)
     retryList <- asks (T.encodeUtf8 . actionTaskRetry)
     maxRetries <- asks actionTaskRetries
 
