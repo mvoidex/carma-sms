@@ -139,7 +139,7 @@ sendAction = scopeM "send" $ catchError sendAction' onError where
     to <- askData "phone"
     msg <- askData "msg"
     from' <- either (throwError . strMsg) return $ sender from
-    to' <- either (throwError . strMsg) return $ phone to
+    to' <- either (throwError . strMsg) return $ phone $ T.dropWhile (=='+') to
 
     mid <- smsdirect' u p $ submitMessage from' to' msg Nothing
     log Debug $ T.concat ["Message id: ", fromString $ show mid]
