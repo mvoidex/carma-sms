@@ -98,7 +98,12 @@ runAction = do
     Left (SMSDirectError 200) -> do
       log Fatal "Invalid login or password"
       throwError . strMsg $ "Invalid login or password"
-    Left _ -> pushRetry
+    Left (SMSDirectError code) -> do
+      log Debug $ T.concat ["SMSDirect returned error: ", fromString $ show code]
+      pushRetry
+    Left (OtherError str) -> do
+      log Error $ T.concat ["Error: ", fromString str]
+      pushRetry
     Right _ -> return ()
   where
     actions = M.fromList [
@@ -127,7 +132,7 @@ runRetry = catchError runRetry' onError
 
 -- | Catch-all action
 noAction :: (MonadLog m, MonadTask m, MonadReader Action m) => T.Text -> m ()
-noAction a = log Error $ T.concat ["Invalid action: ", a]
+noAction a = log Warning $ T.concat ["Invalid action: ", a]
 
 -- | Nothing to do
 noneAction :: (MonadLog m, MonadTask m, MonadReader Action m) => m ()
@@ -135,7 +140,7 @@ noneAction = log Trace "None action"
 
 -- | Send SMS
 sendAction :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError ActionError m) => m ()
-sendAction = scopeM "send" $ catchError sendAction' onError where
+sendAction = scopeM_ "send" $ catchError sendAction' onError where
   sendAction' = do
     u <- asks actionUser
     p <- asks actionPass
@@ -176,7 +181,7 @@ sendAction = scopeM "send" $ catchError sendAction' onError where
 
 -- | Retrieve status of SMS
 statusAction :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError ActionError m) => m ()
-statusAction = scopeM "status" $ do
+statusAction = scopeM_ "status" $ do
   u <- asks actionUser
   p <- asks actionPass
   i <- asks (T.encodeUtf8 . actionTaskId)
@@ -217,10 +222,10 @@ smsdirect' u p cmd = do
 -- Increases \'tries\' field, sets \'lasttry\' to now and pushes task id to task-retry-list
 --
 pushRetry :: (MonadLog m, MonadTask m, MonadError String m, MonadReader Action m) => m ()
-pushRetry = scopeM "retry" $ catchError pushRetry' pushError where
+pushRetry = scopeM_ "retry" $ catchError pushRetry' pushError where
   pushRetry' = do
     b <- push'
-    when (not b) $ log Warning "Number of retries exceeded"
+    when (not b) $ log Trace "Number of retries exceeded"
   pushError s = log Error $ T.concat ["Unable to retry: ", fromString s]
   push' = do
     triesStr <- asks (M.lookup "tries" . actionData)
