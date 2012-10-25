@@ -103,9 +103,9 @@ main = do
       "  -l <level> - log level, default is 'default', possible values are: trace, debug, default, silent",
       "  -k <key> - redis key for tasks, default is 'smspost'",
       "  -r <retry key> - redis key for retries, default is 'smspost:retry'",
-      "  -retries <int> - max retries on sms actions",
-      "  -d <seconds> - delta between tries",
-      "  -mps <int> - HTTP requests per second",
+      "  -retries <int> - max retries on sms actions, default is 10",
+      "  -d <seconds> - delta between tries, default is 60",
+      "  -mps <int> - HTTP requests per second, default is 5",
       "  -i <id> - id of task-processing list, default is '1' (key will be 'smspost:1')",
       "",
       "Examples:",
@@ -113,11 +113,12 @@ main = do
       "  carma-sms -u user -p pass -l trace",
       "  carma-sms -u user -p pass -l silent -k smspostlist"]
     main' flags = do
-      conn <- R.connect R.defaultConnectInfo
+      postCon <- R.connect R.defaultConnectInfo
+      retryCon <- R.connect R.defaultConnectInfo
       l <- newLog (constant (rules $ flag "-l")) [logger text (file "log/carma-sms.log")]
 
-      _ <- forkIO $ retry l conn conf
-      _ <- forkIO $ post l conn conf
+      _ <- forkOS $ retry l retryCon conf
+      _ <- forkOS $ post l postCon conf
       _ <- getLine
       return ()
 

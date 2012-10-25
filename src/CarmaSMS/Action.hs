@@ -9,6 +9,7 @@ module CarmaSMS.Action (
   runAction,
   runRetry,
   noAction,
+  noneAction,
   sendAction,
   statusAction,
   pushRetry
@@ -24,6 +25,7 @@ import Control.Monad.Error
 import qualified Data.ByteString.Char8 as C8
 import qualified Data.Map as M
 import Data.String
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.Time.Clock.POSIX
@@ -78,20 +80,20 @@ instance MonadError e m => MonadError e (ActionM m) where
 
 -- | Run action by user, password, task-list, task-id, task-retry-list and data
 action :: (MonadLog m, MonadTask m, MonadError String m) => Action -> m ()
-action a = runReaderT (actionM runAction) a
+action = runReaderT (actionM runAction)
 
 -- | Retry action
 --
 -- Read \'lasttry\' field, waits delta-time and pushes task back to tasklist
 --
 retry :: (MonadLog m, MonadTask m, MonadError String m) => Action -> m ()
-retry a = runReaderT (actionM runRetry) a
+retry = runReaderT (actionM runRetry)
 
 -- | Run action
 runAction :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError String m) => m ()
 runAction = do
-  act <- asks (maybe "send" id . M.lookup "action" . actionData)
-  res <- runErrorT $ maybe (noAction act) id $ M.lookup act actions
+  act <- asks (fromMaybe "send" . M.lookup "action" . actionData)
+  res <- runErrorT $ fromMaybe (noAction act) $ M.lookup act actions
   case res of
     Left (SMSDirectError 200) -> do
       log Fatal "Invalid login or password"
@@ -100,7 +102,8 @@ runAction = do
   where
     actions = M.fromList [
       ("send", sendAction),
-      ("status", statusAction)]
+      ("status", statusAction),
+      ("none", noneAction)]
 
 -- | Run retry
 runRetry :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError String m) => m ()
@@ -125,6 +128,10 @@ runRetry = catchError runRetry' onError
 noAction :: (MonadLog m, MonadTask m, MonadReader Action m) => T.Text -> m ()
 noAction a = log Error $ T.concat ["Invalid action: ", a]
 
+-- | Nothing to do
+noneAction :: (MonadLog m, MonadTask m, MonadReader Action m) => m ()
+noneAction = log Trace "None action"
+
 -- | Send SMS
 sendAction :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError ActionError m) => m ()
 sendAction = scopeM "send" $ catchError sendAction' onError where
@@ -139,17 +146,26 @@ sendAction = scopeM "send" $ catchError sendAction' onError where
     to <- askData "phone"
     msg <- askData "msg"
     from' <- either (throwError . strMsg) return $ sender from
-    to' <- either (throwError . strMsg) return $ phone $ T.dropWhile (=='+') to
+    to' <- either (throwError . strMsg) return $ phone to
 
     mid <- smsdirect' u p $ submitMessage from' to' msg Nothing
-    log Debug $ T.concat ["Message id: ", fromString $ show mid]
-    _ <- inTask $ do
-      _ <- R.hmset i [
-        ("msgid", C8.pack $ show mid),
-        ("status", "sent"),
-        ("action", "status")]
-      R.lpush tasks [i]
-    return ()
+    case mid of
+      Nothing -> do
+        log Debug "Message id not retrieved"
+        _ <- inTask $
+          R.hmset i [
+            ("status", "sent"),
+            ("action", "none")]
+        return ()
+      Just msgid -> do
+        log Debug $ T.concat ["Message id: ", fromString $ show msgid]
+        _ <- inTask $ do
+          _ <- R.hmset i [
+            ("msgid", C8.pack $ show msgid),
+            ("status", "sent"),
+            ("action", "status")]
+          R.lpush tasks [i]
+        return ()
   onError :: (MonadLog m, MonadTask m, MonadReader Action m, MonadError ActionError m) => ActionError -> m ()
   onError e = do
     log Error $ T.concat ["Unable to send message: ", fromString $ show e]
@@ -170,7 +186,7 @@ statusAction = scopeM "status" $ do
   st <- smsdirect' u p $ statusMessage (read . T.unpack $ msgid)
   log Debug $ T.concat ["Message status: ", fromString $ maybe "(none)" show st]
   case st of
-    Just 0 -> inTask $ R.hmset i [("status", "delivered"), ("action", "")] >> return ()
+    Just 0 -> inTask $ R.hmset i [("status", "delivered"), ("action", "none")] >> return ()
     Just 1 -> do
       e <- runErrorT pushRetry
       case e of
@@ -204,6 +220,7 @@ smsdirect' u p cmd = do
 pushRetry :: (MonadLog m, MonadTask m, MonadError String m, MonadReader Action m) => m ()
 pushRetry = scopeM "retry" $ catchError pushRetry' pushError where
   pushRetry' = do
+    log Trace "I am retrying"
     b <- push'
     when (not b) $ log Warning "Number of retries exceeded"
   pushError s = log Error $ T.concat ["Unable to retry: ", fromString s]
