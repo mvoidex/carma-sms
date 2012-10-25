@@ -84,7 +84,7 @@ rules r = [
 forkW :: IO () -> IO QSem
 forkW act = do
   q <- newQSem 0
-  forkOS $ finally act (signalQSem q)
+  _ <- forkOS $ finally act (signalQSem q)
   return q
 
 main :: IO ()
