@@ -44,6 +44,7 @@ module Main (
 import Prelude hiding (log, catch)
 
 import Control.Concurrent
+import Control.Monad.CatchIO
 import Data.List
 import Data.Maybe (mapMaybe)
 import qualified Data.Map as M
@@ -78,6 +79,13 @@ args as s = arguments s `M.union` M.fromList as
 rules :: String -> Rules
 rules r = [
   parseRule_ (fromString $ "/: use " ++ r)]
+
+-- | For with wait ability
+forkW :: IO () -> IO QSem
+forkW act = do
+  q <- newQSem 0
+  forkOS $ finally act (signalQSem q)
+  return q
 
 main :: IO ()
 main = do
@@ -117,10 +125,9 @@ main = do
       retryCon <- R.connect R.defaultConnectInfo
       l <- newLog (constant (rules $ flag "-l")) [logger text (file "log/carma-sms.log")]
 
-      _ <- forkOS $ retry l retryCon conf
-      _ <- forkOS $ post l postCon conf
-      _ <- getLine
-      return ()
+      w1 <- forkW $ retry l retryCon conf
+      w2 <- forkW $ post l postCon conf
+      mapM_ waitQSem [w1, w2]
 
       where
         conf = Action {

@@ -40,13 +40,13 @@ post l conn a = withLog l $ do
       return ()
     _ -> return ()
   where
-    process i m = scope "sms" $ scope (T.decodeUtf8 i) $ do
+    process i m = scopeM "sms" $ scope (T.decodeUtf8 i) $ do
       A.action $ a {
         actionTaskId = T.decodeUtf8 i,
         actionData = mapData $ m
       }
       liftIO $ threadDelay $ 1000000 `div` (actionMessagesPerSecond a)
-    onError i = scope "sms" $ log Error $ T.concat ["Unable to process: ", T.decodeUtf8 i]
+    onError i = scopeM "sms" $ log Error $ T.concat ["Unable to process: ", T.decodeUtf8 i]
 
 -- | Retry SMS process
 retry :: Log -> R.Connection -> Action -> IO ()
@@ -63,12 +63,12 @@ retry l conn a = withLog l $ do
       return ()
     _ -> return ()
   where
-    process i m = scope "retry" $ scope (T.decodeUtf8 i) $ do
+    process i m = scopeM "retry" $ scope (T.decodeUtf8 i) $ do
       A.retry $ a {
         actionTaskId = T.decodeUtf8 i,
         actionData = mapData $ m
       }
-    onError i = scope "retry" $ log Error $ T.concat ["Unable to process: ", T.decodeUtf8 i]
+    onError i = scopeM "retry" $ log Error $ T.concat ["Unable to process: ", T.decodeUtf8 i]
 
 mapData :: M.Map ByteString ByteString -> M.Map T.Text T.Text
 mapData = M.mapKeys T.decodeUtf8 . M.map T.decodeUtf8

@@ -98,7 +98,8 @@ runAction = do
     Left (SMSDirectError 200) -> do
       log Fatal "Invalid login or password"
       throwError . strMsg $ "Invalid login or password"
-    _ -> pushRetry
+    Left _ -> pushRetry
+    Right _ -> return ()
   where
     actions = M.fromList [
       ("send", sendAction),
@@ -200,9 +201,7 @@ askData t = do
   m <- asks actionData
   case M.lookup t m of
     Nothing -> throwError $ strMsg $ "No field '" ++ T.unpack t ++ "'"
-    Just v -> do
-      log Trace $ T.concat [t, " = ", v]
-      return  v
+    Just v -> trace t $ return v
 
 -- | Logs error and return
 smsdirect' :: (MonadLog m, MonadError ActionError m) => T.Text -> T.Text -> SMSDirect.Command a -> m a
@@ -220,7 +219,6 @@ smsdirect' u p cmd = do
 pushRetry :: (MonadLog m, MonadTask m, MonadError String m, MonadReader Action m) => m ()
 pushRetry = scopeM "retry" $ catchError pushRetry' pushError where
   pushRetry' = do
-    log Trace "I am retrying"
     b <- push'
     when (not b) $ log Warning "Number of retries exceeded"
   pushError s = log Error $ T.concat ["Unable to retry: ", fromString s]
