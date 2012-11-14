@@ -211,7 +211,9 @@ askData t = do
   m <- asks actionData
   case M.lookup t m of
     Nothing -> throwError $ strMsg $ "No field '" ++ T.unpack t ++ "'"
-    Just v -> trace t $ return v
+    Just v -> do
+      log Trace $ T.concat [t, " = ", v]
+      return v
 
 -- | Logs error and return
 smsdirect' :: (MonadLog m, MonadError ActionError m) => T.Text -> T.Text -> SMSDirect.Command a -> m a
