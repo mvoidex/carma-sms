@@ -17,7 +17,7 @@
 -- 
 -- SMS object stored in redis has following format:
 -- 
---   * from - sender
+--   * sender - sender
 --
 --   * phone - receiver, contains only digits
 --

@@ -148,19 +148,21 @@ sendAction = scopeM_ "send" $ catchError sendAction' onError where
     tasks <- asks (T.encodeUtf8 . actionTaskList)
     log Trace $ T.concat ["Sending ", T.decodeUtf8 i]
 
-    from <- askData "from"
+    from <- askData "sender"
     to <- askData "phone"
     msg <- askData "msg"
     from' <- either (throwError . strMsg) return $ sender from
     to' <- either (throwError . strMsg) return $ phone to
 
     mid <- smsdirect' u p $ submitMessage from' to' msg Nothing
+    sentTm <- getTimeStamp
     case mid of
       Nothing -> do
         log Debug "Message id not retrieved"
         _ <- inTask $
           R.hmset i [
             ("status", "sent"),
+            ("sentTime", sentTm),
             ("action", "none")]
         return ()
       Just msgid -> do
@@ -169,6 +171,7 @@ sendAction = scopeM_ "send" $ catchError sendAction' onError where
           _ <- R.hmset i [
             ("msgid", C8.pack $ show msgid),
             ("status", "sent"),
+            ("sentTime", sentTm),
             ("action", "status")]
           R.lpush tasks [i]
         return ()
@@ -192,7 +195,9 @@ statusAction = scopeM_ "status" $ do
   st <- smsdirect' u p $ statusMessage (read . T.unpack $ msgid)
   log Debug $ T.concat ["Message status: ", fromString $ maybe "(none)" show st]
   case st of
-    Just 0 -> inTask $ R.hmset i [("status", "delivered"), ("action", "none")] >> return ()
+    Just 0 -> do
+      delTm <- getTimeStamp
+      inTask $ R.hmset i [("status", "delivered"), ("deliveredTime", delTm), ("action", "none")] >> return ()
     Just 1 -> do
       e <- runErrorT pushRetry
       case e of
@@ -237,12 +242,12 @@ pushRetry = scopeM_ "retry" $ catchError pushRetry' pushError where
     if triesNum >= maxRetries
       then return False
       else do
-        tm <- liftIO $ liftM floor getPOSIXTime
+        tm <- getTimeStamp
 
         _ <- inTask $ do
           _ <- R.hmset i [
             ("tries", fromString . show . succ $ triesNum),
-            ("lasttry", fromString . show $ (tm :: Int))]
+            ("lasttry", tm)]
           R.lpush retryList [i]
         return True
 
@@ -250,3 +255,9 @@ readField :: (Read a, Show a, Error e, MonadError e m) => T.Text -> T.Text -> m 
 readField field s = case reads (T.unpack s) of
   [(i, "")] -> return i
   _ -> throwError . strMsg $ "Unable to parse field '" ++ T.unpack field ++ "': " ++ T.unpack s
+
+-- | Get time stamp in string
+getTimeStamp :: (MonadIO m) => m C8.ByteString
+getTimeStamp = do
+  tm <- liftIO $ liftM floor getPOSIXTime
+  return . fromString . show $ (tm :: Int)
